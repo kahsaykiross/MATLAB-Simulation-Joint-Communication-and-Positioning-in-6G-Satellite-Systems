@@ -1,0 +1,2 @@
+# MATLAB-Simulation-Joint-Communication-and-Positioning-in-6G-Satellite-Systems
+This MATLAB simulation models 6G satellite networks with RIS-assisted links for joint communication and positioning. It incorporates MIMO-OFDM transmission, satellite-to-user channels, and 3D localization, evaluating spectral efficiency, BER, and RMSE. Analytical and AI-based RIS optimizations are compared for multi-user scenarios.
