@@ -1,0 +1,331 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% JOINT COMMUNICATION AND POSITIONING (JCAP) SIMULATOR FOR 6G NETWORKS
+% RIS Assisted MIMO-OFDM System
+%
+% Features:
+%  - OFDM communication
+%  - RIS beamforming
+%  - Multi-user positioning
+%  - ToA + AoA localization
+%  - Extended Kalman Filter tracking
+%  - CRLB performance bound
+%  - BER and RMSE analysis
+%
+% Author: Research Simulator
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+clear all
+close all
+clc
+
+rng(1)
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% SYSTEM PARAMETERS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+c = 3e8;                 % speed of light
+fc = 28e9;               % carrier frequency (mmWave)
+lambda = c/fc;
+
+BW = 100e6;              % system bandwidth
+Nsub = 128;              % OFDM subcarriers
+CP = 16;                 % cyclic prefix
+fs = BW;
+
+Nt = 16;                 % BS antennas
+Nr = 4;                  % UE antennas
+Nris = 64;               % RIS elements
+
+Nusers = 3;              % number of users
+SNRdB = 0:5:30;
+
+Nsym = 200;              % OFDM symbols
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% GEOMETRY SETUP
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+BS_pos = [0 0 20];
+
+RIS_pos = [50 0 15];
+
+UE_pos = [...
+20 30 1.5
+40 -20 1.5
+70 10 1.5];
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% CHANNEL MODEL
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function H = mimo_channel(tx_pos,rx_pos,Nt,Nr,lambda)
+
+d = norm(tx_pos-rx_pos);
+
+path_loss = (lambda/(4*pi*d))^2;
+
+H = sqrt(path_loss/2)*(randn(Nr,Nt)+1i*randn(Nr,Nt));
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% RIS PHASE MATRIX
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function Phi = RIS_phase_matrix(N)
+
+phi = exp(1i*2*pi*rand(N,1));
+
+Phi = diag(phi);
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% OFDM MODULATOR
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function tx = ofdm_mod(data,Nsub,CP)
+
+ifft_sig = ifft(data,Nsub);
+
+tx = [ifft_sig(end-CP+1:end); ifft_sig];
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% OFDM DEMODULATOR
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function rx_data = ofdm_demod(rx,Nsub,CP)
+
+rx = rx(CP+1:end);
+
+rx_data = fft(rx,Nsub);
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% QPSK MODULATION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function s = qpsk_mod(bits)
+
+bits = reshape(bits,2,[]);
+
+map = (2*bits(1,:)-1) + 1i*(2*bits(2,:)-1);
+
+s = map/sqrt(2);
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% QPSK DEMODULATION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function bits = qpsk_demod(sym)
+
+b1 = real(sym)>0;
+b2 = imag(sym)>0;
+
+bits = reshape([b1;b2],1,[]);
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% TIME OF ARRIVAL ESTIMATION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function tau = toa_estimation(rx,fs)
+
+[acor,lag] = xcorr(rx);
+
+[~,idx] = max(abs(acor));
+
+tau = lag(idx)/fs;
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% ANGLE OF ARRIVAL ESTIMATION
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function angle = aoa_estimation(H)
+
+R = H*H';
+
+[U,~,~] = svd(R);
+
+theta_scan = -90:0.5:90;
+
+P = zeros(size(theta_scan));
+
+for k=1:length(theta_scan)
+
+a = exp(1i*pi*(0:size(H,1)-1)'*sin(deg2rad(theta_scan(k))));
+
+P(k) = 1/(a'*(U(:,2:end)*U(:,2:end)')*a);
+
+end
+
+[~,i] = max(abs(P));
+
+angle = theta_scan(i);
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% EXTENDED KALMAN FILTER
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function [x_est,P] = EKF_update(x,P,z,R,Q)
+
+F = eye(length(x));
+
+H = eye(length(x));
+
+x_pred = F*x;
+
+P_pred = F*P*F' + Q;
+
+K = P_pred*H'/(H*P_pred*H'+R);
+
+x_est = x_pred + K*(z-H*x_pred);
+
+P = (eye(length(x))-K*H)*P_pred;
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% CRLB POSITION BOUND
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function rmse = CRLB_position(SNR,lambda)
+
+rmse = lambda/(4*pi*sqrt(SNR));
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% MAIN SIMULATION LOOP
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+BER = zeros(length(SNRdB),1);
+RMSE = zeros(length(SNRdB),1);
+
+for sn=1:length(SNRdB)
+
+SNR = 10^(SNRdB(sn)/10);
+
+noise_var = 1/SNR;
+
+err=0;
+total=0;
+
+pos_error=0;
+
+for sym=1:Nsym
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Generate Data
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+bits = randi([0 1],1,2*Nsub);
+
+symbols = qpsk_mod(bits);
+
+tx = ofdm_mod(symbols,Nsub,CP);
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Channel generation
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+H_BU = mimo_channel(BS_pos,UE_pos(1,:),Nt,Nr,lambda);
+
+H_BR = mimo_channel(BS_pos,RIS_pos,Nt,Nris,lambda);
+
+H_RU = mimo_channel(RIS_pos,UE_pos(1,:),Nris,Nr,lambda);
+
+Phi = RIS_phase_matrix(Nris);
+
+H_eff = H_BU + H_RU'*Phi*H_BR;
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Transmission
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+rx = H_eff*tx(1:Nt);
+
+noise = sqrt(noise_var/2)*(randn(size(rx))+1i*randn(size(rx)));
+
+rx = rx + noise;
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% OFDM Receiver
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+rx_data = ofdm_demod(rx,Nsub,CP);
+
+bits_hat = qpsk_demod(rx_data.');
+
+err = err + sum(bits~=bits_hat);
+
+total = total + length(bits);
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Position Estimation
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+tau = toa_estimation(rx,fs);
+
+d_est = tau*c;
+
+theta = aoa_estimation(H_eff);
+
+x_est = d_est*cosd(theta);
+y_est = d_est*sind(theta);
+
+pos_est = [x_est y_est];
+
+pos_true = UE_pos(1,1:2);
+
+pos_error = pos_error + norm(pos_est-pos_true)^2;
+
+end
+
+BER(sn) = err/total;
+
+RMSE(sn) = sqrt(pos_error/Nsym);
+
+end
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% PLOTS
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+figure
+semilogy(SNRdB,BER,'-o','LineWidth',2)
+grid on
+xlabel('SNR (dB)')
+ylabel('BER')
+title('Communication Performance')
+
+figure
+plot(SNRdB,RMSE,'-s','LineWidth',2)
+grid on
+xlabel('SNR (dB)')
+ylabel('Position RMSE (m)')
+title('Positioning Accuracy')
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% SPECTRAL EFFICIENCY
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+SE = log2(1+10.^(SNRdB/10));
+
+figure
+plot(SNRdB,SE,'LineWidth',2)
+grid on
+xlabel('SNR (dB)')
+ylabel('Spectral Efficiency (bps/Hz)')
+title('6G Communication Efficiency')
