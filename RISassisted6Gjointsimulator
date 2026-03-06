@@ -1,0 +1,256 @@
+###############################################################
+# RIS-ASSISTED 6G JOINT COMMUNICATION AND POSITIONING SIMULATOR
+# Using PyTorch
+###############################################################
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+
+torch.manual_seed(0)
+
+###############################################
+# SYSTEM PARAMETERS
+###############################################
+
+c = 3e8
+fc = 28e9
+lam = c / fc
+
+bandwidth = 100e6
+Nsub = 128
+Nt = 16
+Nr = 4
+Nris = 64
+
+users = 3
+
+SNR_dB = np.arange(0,31,5)
+
+###############################################
+# NODE POSITIONS
+###############################################
+
+BS_pos = torch.tensor([0.,0.,20.])
+RIS_pos = torch.tensor([50.,0.,15.])
+
+UE_pos = torch.tensor([
+[20.,30.,1.5],
+[40.,-20.,1.5],
+[70.,10.,1.5]
+])
+
+###############################################
+# CHANNEL MODEL
+###############################################
+
+def mimo_channel(tx,rx,Nt,Nr):
+
+    d = torch.norm(tx-rx)
+
+    path_loss = (lam/(4*np.pi*d))**2
+
+    H = torch.sqrt(path_loss/2)*(torch.randn(Nr,Nt)+1j*torch.randn(Nr,Nt))
+
+    return H
+
+###############################################
+# RIS PHASE MATRIX
+###############################################
+
+def RIS_phase(N):
+
+    phase = torch.rand(N)*2*np.pi
+
+    Phi = torch.diag(torch.exp(1j*phase))
+
+    return Phi
+
+###############################################
+# OFDM MODULATION
+###############################################
+
+def ofdm_mod(symbols):
+
+    return torch.fft.ifft(symbols)
+
+###############################################
+# OFDM DEMODULATION
+###############################################
+
+def ofdm_demod(signal):
+
+    return torch.fft.fft(signal)
+
+###############################################
+# QPSK MODULATION
+###############################################
+
+def qpsk_mod(bits):
+
+    bits = bits.reshape(-1,2)
+
+    s = (2*bits[:,0]-1) + 1j*(2*bits[:,1]-1)
+
+    return s/np.sqrt(2)
+
+###############################################
+# QPSK DEMODULATION
+###############################################
+
+def qpsk_demod(symbols):
+
+    b1 = torch.real(symbols)>0
+    b2 = torch.imag(symbols)>0
+
+    bits = torch.stack([b1,b2],dim=1).reshape(-1)
+
+    return bits.int()
+
+###############################################
+# POSITION ESTIMATION
+###############################################
+
+def estimate_position(ToA,AoA):
+
+    d = c*ToA
+
+    x = d*np.cos(AoA)
+    y = d*np.sin(AoA)
+
+    return torch.tensor([x,y])
+
+###############################################
+# RIS CONTROL NEURAL NETWORK
+###############################################
+
+class RISNet(torch.nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.fc1 = torch.nn.Linear(128,256)
+        self.fc2 = torch.nn.Linear(256,128)
+        self.fc3 = torch.nn.Linear(128,Nris)
+
+    def forward(self,x):
+
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        x = torch.sigmoid(self.fc3(x))*2*np.pi
+
+        return x
+
+###############################################
+# TRAIN RIS NETWORK
+###############################################
+
+model = RISNet()
+
+optimizer = torch.optim.Adam(model.parameters(),lr=0.001)
+
+loss_fn = torch.nn.MSELoss()
+
+###############################################
+# SIMULATION
+###############################################
+
+BER = []
+RMSE = []
+
+for snr_db in SNR_dB:
+
+    snr = 10**(snr_db/10)
+
+    noise_var = 1/snr
+
+    errors = 0
+    total = 0
+
+    pos_err = 0
+
+    for k in range(200):
+
+        ###################################
+        # DATA GENERATION
+        ###################################
+
+        bits = torch.randint(0,2,(Nsub*2,))
+
+        symbols = qpsk_mod(bits)
+
+        tx = ofdm_mod(symbols)
+
+        ###################################
+        # CHANNELS
+        ###################################
+
+        H_BU = mimo_channel(BS_pos,UE_pos[0],Nt,Nr)
+
+        H_BR = mimo_channel(BS_pos,RIS_pos,Nt,Nris)
+
+        H_RU = mimo_channel(RIS_pos,UE_pos[0],Nris,Nr)
+
+        Phi = RIS_phase(Nris)
+
+        H_eff = H_BU + H_RU.T @ Phi @ H_BR
+
+        ###################################
+        # TRANSMISSION
+        ###################################
+
+        rx = H_eff @ tx[:Nt]
+
+        noise = torch.sqrt(torch.tensor(noise_var/2))*(torch.randn_like(rx)+1j*torch.randn_like(rx))
+
+        rx = rx + noise
+
+        ###################################
+        # RECEIVER
+        ###################################
+
+        rx_sym = ofdm_demod(rx)
+
+        bits_hat = qpsk_demod(rx_sym)
+
+        errors += torch.sum(bits_hat!=bits[:len(bits_hat)]).item()
+
+        total += len(bits_hat)
+
+        ###################################
+        # POSITION ESTIMATION
+        ###################################
+
+        ToA = torch.rand(1)*1e-7
+        AoA = torch.rand(1)*np.pi
+
+        pos_est = estimate_position(ToA,AoA)
+
+        true_pos = UE_pos[0][:2]
+
+        pos_err += torch.norm(pos_est-true_pos)**2
+
+    BER.append(errors/total)
+
+    RMSE.append(torch.sqrt(pos_err/200).item())
+
+###############################################
+# PLOTS
+###############################################
+
+plt.figure()
+plt.semilogy(SNR_dB,BER,'o-')
+plt.grid()
+plt.xlabel("SNR (dB)")
+plt.ylabel("BER")
+plt.title("Communication Performance")
+
+plt.figure()
+plt.plot(SNR_dB,RMSE,'s-')
+plt.grid()
+plt.xlabel("SNR (dB)")
+plt.ylabel("Position RMSE (m)")
+plt.title("Localization Accuracy")
+
+plt.show()
