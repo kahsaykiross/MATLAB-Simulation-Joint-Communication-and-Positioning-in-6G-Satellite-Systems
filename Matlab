@@ -1,0 +1,158 @@
+clc;
+clear;
+close all;
+
+%% =========================
+% System Parameters
+%% =========================
+
+c = 3e8;                % Speed of light
+fc = 28e9;              % Carrier frequency (28 GHz mmWave)
+lambda = c/fc;          % Wavelength
+
+BW = 100e6;             % Bandwidth (100 MHz)
+fs = BW;                % Sampling frequency
+
+Nsub = 128;             % OFDM subcarriers
+CP = 16;                % Cyclic prefix length
+M = 4;                  % QPSK modulation
+numSymbols = 1000;      % OFDM symbols
+
+SNR_dB = 0:5:30;
+
+%% =========================
+% Satellite and User Geometry
+%% =========================
+
+% Satellite coordinates (km)
+sat_pos = [0 0 600e3];
+
+% True user position
+user_true = [1000 500 0];
+
+%% =========================
+% OFDM Transmitter
+%% =========================
+
+bits = randi([0 1], Nsub*log2(M), numSymbols);
+
+% QPSK modulation
+symbols = pskmod(bits, M, pi/4, 'InputType','bit');
+
+% OFDM modulation
+ofdm_signal = ifft(symbols, Nsub);
+
+% Add cyclic prefix
+ofdm_signal_cp = [ofdm_signal(end-CP+1:end,:); ofdm_signal];
+
+tx_signal = ofdm_signal_cp(:);
+
+%% =========================
+% Channel Model
+%% =========================
+
+% Distance calculation
+d = norm(user_true - sat_pos);
+
+% Propagation delay
+tau = d/c;
+
+% Delay samples
+delay_samples = round(tau*fs);
+
+% Free space path loss
+PL = (lambda/(4*pi*d))^2;
+
+%% =========================
+% Apply Channel
+%% =========================
+
+rx_signal = [zeros(delay_samples,1); tx_signal];
+
+rx_signal = sqrt(PL)*rx_signal;
+
+%% =========================
+% Add Noise
+%% =========================
+
+BER = zeros(length(SNR_dB),1);
+
+for snr_idx = 1:length(SNR_dB)
+
+    snr = SNR_dB(snr_idx);
+
+    rx_noisy = awgn(rx_signal,snr,'measured');
+
+    %% =========================
+    % Receiver
+    %% =========================
+
+    % Remove delay
+    rx_aligned = rx_noisy(delay_samples+1:end);
+
+    % Reshape OFDM
+    rx_matrix = reshape(rx_aligned, Nsub+CP, numSymbols);
+
+    % Remove CP
+    rx_matrix = rx_matrix(CP+1:end,:);
+
+    % FFT
+    rx_fft = fft(rx_matrix,Nsub);
+
+    %% =========================
+    % Demodulation
+    %% =========================
+
+    rx_bits = pskdemod(rx_fft,M,pi/4,'OutputType','bit');
+
+    tx_bits = bits(:);
+
+    rx_bits = rx_bits(:);
+
+    BER(snr_idx) = sum(tx_bits ~= rx_bits)/length(tx_bits);
+
+end
+
+%% =========================
+% TOA Position Estimation
+%% =========================
+
+% Estimated delay from correlation
+corr = xcorr(rx_signal,tx_signal);
+
+[~,idx] = max(abs(corr));
+
+estimated_delay = idx - length(tx_signal);
+
+tau_est = estimated_delay/fs;
+
+d_est = tau_est*c;
+
+% Estimated user position (1 satellite assumption)
+user_est = sat_pos + d_est*[1 0 0];
+
+position_error = norm(user_est - user_true);
+
+fprintf('Estimated Distance: %.2f meters\n',d_est)
+fprintf('True Distance: %.2f meters\n',d)
+fprintf('Position Error: %.2f meters\n',position_error)
+
+%% =========================
+% Plot BER
+%% =========================
+
+figure;
+semilogy(SNR_dB,BER,'-o','LineWidth',2);
+grid on;
+xlabel('SNR (dB)');
+ylabel('Bit Error Rate');
+title('Communication Performance');
+
+%% =========================
+% Plot Positioning Error
+%% =========================
+
+figure;
+bar(position_error);
+title('Position Estimation Error');
+ylabel('Error (meters)');
